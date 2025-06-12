@@ -1,75 +1,102 @@
-# DeleteOldMarketPricesFunction Usage
-
+# MaxSizeSummarizer Function Usage
 ## What It Does
-Deletes MarketPrices region entries using the priceTimstamp field that are older than a specified timestamp.
+Analyzes all regions in the GemFire cluster to find the largest object in each region and provides G1 garbage collection heap region size recommendations.
+
+## How It Works
+- Samples up to 100 entries per region to find maximum object size
+- Uses OQL queries for large regions (>10,000 entries) to avoid memory overhead
+- Calculates actual in-memory size using ObjectGraphSizer
+- Provides cluster-wide G1HeapRegionSize recommendations based on largest object found
 
 ## Safety
-- Only deletes data older than 2 years
-- Processes data in batches to avoid memory issues
-- Logs all operations onto the cache server logs
+- Read-only operation - does not modify any data
+- Limits sampling to prevent memory issues on massive regions
+- Automatically uses efficient query methods for large regions
+- Should be run on a single member to avoid duplicate work
 
 ## Input
-- (Required) You must provide a timestamp as an argument in the form of a unix timestamp that includes milliseconds. Example: 1748895985671
-- (Optional) Batch Size. Defaults to deleting 10000 at a time, but can be increased or decreased as needed.
+- No arguments required. The function automatically analyzes all regions in the cluster.
 
 ## Compile and Package
-
-### Prequisites
+### Prerequisites
 - Appropriate JDK installed to compile and package file
-- GemFire installed and $GEMFIRE_HOME set on path.
+- GemFire installed and $GEMFIRE_HOME set on path
+- Log4j2 dependencies for logging
 
 ### Compile and Package
-Run the compile-custom-functions.sh script to compile DeleteOldMarketPricesFunction.java and build custom-functions.jar. These files will be in the custom-functions/target directory if successful. 
-
+Run the compile-custom-functions.sh script to compile MaxSizeSummarizer.java and build custom-functions.jar. These files will be in the custom-functions/target directory if successful.
 ```
 ./compile-custom-functions.sh
 ```
 
 ## How to Use
-
 ### 1. Deploy the JAR
-
 ```
 gfsh> deploy --jar=/path/to/custom-functions.jar
 ```
-
+   
 ### 2. Execute the Function
-
-Basic usage (default 10,000 batch size):
+Run on a specific member (recommended):
 ```
-gfsh> execute function --id=DeleteOldMarketPricesFunction --region=/MarketPrices --arguments=TIMESTAMP
+gfsh> execute function --id=MaxSizeSummarizer --member=server-0
 ```
-
-With custom batch size:
+Run on all members (may show duplicate results):
 ```
-gfsh> execute function --id=DeleteOldMarketPricesFunction --region=/MarketPrices --arguments=TIMESTAMP,BATCH_SIZE
+gfsh> execute function --id=MaxSizeSummarizer
 ```
 
-## Examples
-
-Delete entries older than January 1, 2020:
+### Example gfsh Output 
 ```
-gfsh> execute function --id=DeleteOldMarketPricesFunction --region=/MarketPrices --arguments=1577836800000
+Cluster-42 gfsh>execute function --id=MaxSizeSummarizer  --member=server-0
+ Member  | Status | Message
+-------- | ------ | -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+server-0 | OK     | [Analyzing on member: server-0, , persistentReplicatedRegion2 (1 entries): max=56 bytes (0.000 MB), MarketPrices (46 entries): max=19,779,176 bytes (18.863 MB), , LARGEST OBJECT: 19,779,176 bytes (18.863 MB)..
+```
+Note that the output may be truncated depending on how many columns your terminal is set to, to see the full report, check the logs on the member where the function ran (in this example above, `server-0`) 
+
+### Example Log Output
+```
+[info 2025/06/12 15:30:18.046 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Starting execution on member: server-0
+[info 2025/06/12 15:30:18.053 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Found 9 regions to analyze
+[info 2025/06/12 15:30:18.054 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Analyzing region: /persistentReplicatedRegion2 with 1 entries
+[info 2025/06/12 15:30:18.056 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Region /persistentReplicatedRegion2 - max object size: 56 bytes (0.000 MB)
+[info 2025/06/12 15:30:18.060 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Analyzing region: /MarketPrices with 46 entries
+[info 2025/06/12 15:30:19.095 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Region /MarketPrices - max object size: 19779176 bytes (18.863 MB)
+[warn 2025/06/12 15:30:19.095 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Found object larger than 16MB: 18.862892150878906 MB
+[info 2025/06/12 15:30:19.096 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Analysis complete. Largest object: 19779176 bytes (18.863 MB). Recommendation: Keep 32M but WARNING - 18.86MB object will be humongous!
+[info 2025/06/12 15:30:19.096 UTC server-0 <Function Execution Processor5> tid=0x9c] MaxSizeSummarizer: Execution completed successfully
 ```
 
-Delete with 50,000 batch size for faster processing:
-```
-gfsh> execute function --id=DeleteOldMarketPricesFunction --region=/MarketPrices --arguments=1577836800000,50000
-```
 
-## Getting Timestamps
+### Understanding Results
+#### G1 Heap Region Size Recommendations:
+Largest Object SizeRecommendationReason< 8 MB-XX:G1HeapRegionSize=16MAllows efficient young generation, good for small objects8-16 MB-XX:G1HeapRegionSize=32MBalances large object handling with GC efficiency> 16 MBKeep 32M with WARNINGObjects > 50% of region size become "humongous"
 
-Current time minus 2 years in milliseconds:
-- Today (June 3, 2025): 1748893011803
-- 2 years ago: 1685821011803
+### Important Notes:
 
-Convert dates at: https://www.epochconverter.com/
+Objects > 50% of G1HeapRegionSize are allocated as "humongous objects"
+Humongous objects bypass young generation and can impact GC performance
+If you see objects > 16MB with 32M regions, consider application-level chunking
 
 ## Monitoring
-
-Check remaining entries:
+Check function execution in server logs:
 ```
-gfsh> query --query="SELECT COUNT(*) FROM /MarketPrices"
+grep "MaxSizeSummarizer" /var/gemfire/server-0.log
+```
+View detailed analysis per region:
+```
+grep "max object size" /var/gemfire/server-0.log
 ```
 
-View logs on each server for detailed progress.
+## For regions with millions or billions of entries:
+
+- The function only samples 100 entries via OQL
+- This may not catch rare large objects
+- Consider domain knowledge about your data distribution
+
+## Limitations
+
+- Samples only 100 entries per region (may miss outliers in very large regions)
+- OQL LIMIT clause doesn't randomize, may have sampling bias
+- Results show estimated maximum, not guaranteed maximum
+- For critical sizing decisions, consider analyzing during different workload patterns
